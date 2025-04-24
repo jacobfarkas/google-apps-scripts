@@ -9,42 +9,46 @@
 // ** Assumptions **
 //   - You have Gmail filters configured to add the "vip-notify" label to relevant messages.
 //   - You created a Google Chat spaces location, and webhook, so you have where to post the notifications
+//   - Configuration is stored in the separate "config.gs" file
 //   - See the full tech recipe here:
 //   - https://github.com/jacobfarkas/google-apps-scripts/blob/main/gmail-vip-to%20gchat-notifier/gmail-vip-to%20gchat-notifier_tech-recipe.md
 
 function doGet(e) {
   try {
-    // Place your Webhook URL here, in between the single-quotes, leave the semicolon at end of line
-    const spacesUrl = 'https://chat.googleapis.com/v1/spaces/AAAA3V0TPOo/messages?key=AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI&token=cvvBwKfpVtcIFGfZ9hNRcfGnA8mHKS3MKURISQerDn4';
+    // Get webhook URL from configuration file
+    const spacesUrl = CONFIG.WEBHOOK_URL;
     
-    // Find threads with the "vip-notify" label - with timeout/retry logic
+    // Find threads with the configured label - with timeout/retry logic
     let vipThreads;
     let retries = 0;
-    const maxRetries = 3;
     
-    while (retries < maxRetries) {
+    while (retries < CONFIG.MAX_RETRIES) {
       try {
-        vipThreads = GmailApp.search('label:vip-notify', 0, 10); // Limit to 10 threads at a time
+        vipThreads = GmailApp.search(`label:${CONFIG.NOTIFY_LABEL}`, 0, CONFIG.THREADS_PER_BATCH);
         break; // If successful, exit the loop
       } catch (searchError) {
         retries++;
-        if (retries >= maxRetries) throw searchError;
+        if (retries >= CONFIG.MAX_RETRIES) throw searchError;
         Utilities.sleep(1000 * retries); // Exponential backoff
       }
     }
     
-    // Check if current time is within office hours (7am-7pm weekdays, ET)
+    // Check if current time is within office hours
     const now = new Date();
     const day = now.getDay();
-    const currentTime = Utilities.formatDate(now, 'America/New_York', 'HH:mm');
-    const isOfficeHours = (currentTime >= '07:00' && currentTime < '19:00') && (day !== 0 && day !== 6);
+    const currentTime = Utilities.formatDate(now, CONFIG.OFFICE_HOURS.TIMEZONE, 'HH:mm');
+    const isOfficeHours = (
+      currentTime >= CONFIG.OFFICE_HOURS.START_TIME && 
+      currentTime < CONFIG.OFFICE_HOURS.END_TIME && 
+      !CONFIG.OFFICE_HOURS.WEEKEND_DAYS.includes(day)
+    );
     
     let processedCount = 0;
     
     // Only proceed during office hours and if there are threads to process
     if (isOfficeHours && vipThreads && vipThreads.length > 0) {
       // Get the label outside the loop to reduce API calls
-      const vipLabel = GmailApp.getUserLabelByName('vip-notify');
+      const vipLabel = GmailApp.getUserLabelByName(CONFIG.NOTIFY_LABEL);
       
       // Process each thread
       for (let i = 0; i < vipThreads.length; i++) {
@@ -61,7 +65,7 @@ function doGet(e) {
           // Send chat notification with retry logic
           let sendSuccess = false;
           let sendRetries = 0;
-          while (!sendSuccess && sendRetries < 3) {
+          while (!sendSuccess && sendRetries < CONFIG.MAX_RETRIES) {
             try {
               UrlFetchApp.fetch(spacesUrl, {
                 'method': 'post',
@@ -73,7 +77,7 @@ function doGet(e) {
               sendSuccess = true;
             } catch (fetchError) {
               sendRetries++;
-              if (sendRetries >= 3) {
+              if (sendRetries >= CONFIG.MAX_RETRIES) {
                 console.error("Failed to send notification after 3 attempts: " + fetchError);
                 break;
               }
@@ -89,7 +93,7 @@ function doGet(e) {
           
           // Add a pause between processing to avoid hitting rate limits
           if (i < vipThreads.length - 1) {
-            Utilities.sleep(200);
+            Utilities.sleep(CONFIG.THREAD_PROCESSING_DELAY);
           }
         } catch (threadError) {
           console.error("Error processing thread: " + threadError);
